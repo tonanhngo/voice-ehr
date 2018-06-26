@@ -1,0 +1,15 @@
+{
+  "name": "compose-deepspeech-csv",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "csv-parse": "^2.5.0",
+    "number-to-words": "^1.2.3"
+  }
+}

@@ -49,7 +49,7 @@ function parseCSV(originCSV, dataDir, output) {
       let transcript = columns[settings.transcript] ?
         columns[settings.transcript].toLowerCase() : '';
       transcript = transcript.replace(/[`",?!]/g, '')
-        .replace('-', ' ').replace(/\.$/, '').replace('km', 'kilometer');
+        .replace(/-/g, ' ').replace(/\.$/, '').replace('km', 'kilometer');
 
       // Number to words
       let matched = numRe.exec(transcript);

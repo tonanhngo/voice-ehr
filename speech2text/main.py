@@ -2,55 +2,46 @@ import json
 import scipy.io.wavfile as wav
 import pandas
 import argparse
+import speech_recognition as sr
+import re
 from watson_developer_cloud import SpeechToTextV1
 from deepspeech.model import Model
 from timeit import default_timer as timer
 
-class WatsonSTT:
+class STTServices:
     """ Wrap SpeechToTextV1 and provide the methods we need"""
 
-    def __init__(self, config):
-        self.config = config
+    def __init__(self, settings):
+        self.settings = {}
+        for key in settings:
+            self.settings[str(key).lower()] = settings[key]
 
-    def connect(self):
-        with open(self.config, 'r') as f:
-            settings = json.load(f)
-            self.conn = SpeechToTextV1(
-                username=settings['username'],
-                password=settings['password'],
-                url=settings['url']
-            )
+    def init(self):
+        self.recognizer = sr.Recognizer()
 
     def oneshoot(self, wav_file):
-        with open(wav_file, 'rb') as audio:
+        with sr.AudioFile(wav_file) as source:
+            audio = self.recognizer.record(source)
+        results = {}
+
+        for key in self.settings:
             start = timer()
-            response = self.conn.recognize(
-                audio=audio,
-                content_type='audio/wav',
-                timestamps=True,
-                word_alternatives_threshold=0.9
-            )
-            latency = timer() - start
-            print('watson STT costs %0.3fs.' % latency)
+            if key == 'google':
+                results[key] = { 'res': self.recognizer.recognize_google_cloud(audio, credentials_json=self.settings[key]['credentials'])}
+            elif key == 'watson':
+                results['watson'] = { 'res': self.recognizer.recognize_ibm(audio, 
+                    username=self.settings[key]['username'], password=self.settings[key]['password'])}
+            elif key == 'bling':
+                results['bling'] = {'res': self.recognizer.recognize_bing(audio, key=self.settings[key]['key'])}
 
-        return response, latency
+            results[key]['latency'] = timer() - start
 
-    def get_sentences(self, json_result):
-        rev = []
-        if json_result is None:
-            return rev
-
-        sentence = ''
-        for one in json_result['results']:
-            sentence += one['alternatives'][0]['transcript']
-        
-        rev.append(sentence)
-        return rev
+        return results
 
 class DeepSpeech:
     """Wrap DeepSpeech and provide the methods we need"""
 
-    def __init__(self, config):
+    def __init__(self, settings):
 
         self.beam_width = 1024
         self.lm_weight = 1.75
@@ -58,13 +49,10 @@ class DeepSpeech:
         self.valid_word_count_weight = 1.00
         self.n_features = 26
         self.n_context = 9
-
-        with open(config, 'r') as f:
-            settings = json.load(f)
-            self.alphabet = settings.get('alphabet')
-            self.lm = settings.get('lm')
-            self.trie = settings.get('trie')
-            self.graph = settings.get('graph')
+        self.alphabet = settings.get('alphabet')
+        self.lm = settings.get('lm')
+        self.trie = settings.get('trie')
+        self.graph = settings.get('graph')
 
     def load_model(self):
         start = timer()
@@ -121,67 +109,62 @@ def levenshtein(a,b):
     return current[n]
 
 def run(args):
+    with open(args.config, 'r') as f:
+        settings = json.load(f)
+
     # Let's load the DeepSpeech model first
-    ds = DeepSpeech(args.ds)
+    ds = DeepSpeech(settings.pop('deepspeech'))
     ds.load_model()
 
     # Init Watson STT service
-    stt = WatsonSTT(args.watson)
-    stt.connect()
+    stt = STTServices(settings)
+    stt.init()
  
-    output = []
+    outputs = []
     csv_data = pandas.read_csv(args.csv)
-    total_watson_edit_distance = 0
-    total_ds_edit_distance = 0
+    total_distance = {'deepspeech':0}
+    for key in stt.settings:
+        total_distance[key] = 0
+
+    end_period = re.compile("\.$")
 
     for row in csv_data.itertuples():
-        watson_results, watson_latency = stt.oneshoot(row[1])
+        results = stt.oneshoot(row[1])
         ds_results, ds_latency = ds.oneshoot(row[1])
-        sentences = stt.get_sentences(watson_results)
         transcript = row[3].strip().lower()
         label = transcript.split()
     
-        watson_res = sentences[0].strip().lower()
-        watson_edit_distance = levenshtein(label, watson_res.split())
+        output = {'wav_file': row[1], 'transcript': transcript, 
+                'deepspeech': ds_results.strip(), 'deepspeech_latency': ds_latency,
+                'deepspeech_distance': levenshtein(label, ds_results.split())}
+        total_distance['deepspeech'] += output['deepspeech_distance']
 
-        ds_results = ds_results.strip()
-        ds_edit_distance = levenshtein(label, ds_results.split())
+        for result in results:
+            values = results[result]
+            res = end_period.sub('', values['res'].strip().lower())
+            output[result] = res
+            output[result + '_latency'] = values['latency']
+            output[result + '_distance'] = levenshtein(label, res.split())
+            total_distance[result] += output[result + '_distance']
 
-        total_watson_edit_distance += watson_edit_distance
-        total_ds_edit_distance += ds_edit_distance
-        output.append({
-            'wav_file': row[1],
-            'transcript': transcript,
-            'watson': watson_res,
-            'watson_latency': watson_latency,
-            'watson_distance': watson_edit_distance,
-            'deepspeech': ds_results,
-            'deepspeech_latency': ds_latency,
-            'deepspeech_distance': ds_edit_distance
-        })
+        print(json.dumps(output, indent=2))
+        print('')
+        total_distance['deepspeech'] += output['deepspeech_distance']
+        outputs.append(output)
 
-        print("label     :%s" % transcript)
-        print("watson    :%s" % watson_res)
-        print("deepspeech:%s" % ds_results)
-        print("levenshtein:%d (watson) vs %d (ds)" % (watson_edit_distance, ds_edit_distance))
-        print("")
+    print("avg levenshtein:")
+    print(json.dumps(total_distance, indent=2))
 
-    print("avg levenshtein: %0.3f (watson) vs %0.3f (ds)" % (total_watson_edit_distance/csv_data.shape[0], total_ds_edit_distance/csv_data.shape[0]))
-
-    pandas.DataFrame(output).to_csv('results.csv', index=False)
+    pandas.DataFrame(outputs).to_csv('results.csv', index=False)
 
 def main():
     parser = argparse.ArgumentParser(description='A tool to compare STT accuracy between Watson and DeepSpeech')
     parser.add_argument('--csv',
         help='Path to the csv file which contains the wav and label for STT')
-    parser.add_argument('--watson',
+    parser.add_argument('--config',
         nargs='?',
-        default='./watson.json',
-        help='A JSON file which stores credentials for Watson Speech to Text service')
-    parser.add_argument('--ds',
-        nargs='?',
-        default='./ds.json',
-        help='A JSON file which stores settings for DeepSpeech')
+        default='./config.json',
+        help='A JSON file which stores credentials for multiple Speech to Text Service')
 
     args = parser.parse_args()
     if args.csv is None:

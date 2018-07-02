@@ -4,6 +4,7 @@ import pandas
 import argparse
 import speech_recognition as sr
 import re
+from speech_recognition import UnknownValueError
 from watson_developer_cloud import SpeechToTextV1
 from deepspeech.model import Model
 from timeit import default_timer as timer
@@ -12,11 +13,21 @@ class STTServices:
     """ Wrap SpeechToTextV1 and provide the methods we need"""
 
     def __init__(self, settings):
-        self.settings = {}
+        self._settings = {}
+        self.services = []
+        self.ds = None
+        if settings.get('deepspeech') is not None:
+            self.ds = DeepSpeech(settings['deepspeech'])
+
         for key in settings:
-            self.settings[str(key).lower()] = settings[key]
+            self._settings[str(key).lower()] = settings[key]
+            self.services.append(str(key).lower())
 
     def init(self):
+        # Let's load the DeepSpeech model first
+        if self.ds is not None:
+            self.ds.load_model()
+
         self.recognizer = sr.Recognizer()
 
     def oneshoot(self, wav_file):
@@ -24,19 +35,35 @@ class STTServices:
             audio = self.recognizer.record(source)
         results = {}
 
-        for key in self.settings:
+        newline = re.compile("\\n")
+        for key in self._settings:
             start = timer()
-            if key == 'google':
-                results[key] = { 'res': self.recognizer.recognize_google_cloud(audio, credentials_json=self.settings[key]['credentials'])}
-            elif key == 'watson':
-                results['watson'] = { 'res': self.recognizer.recognize_ibm(audio, 
-                    username=self.settings[key]['username'], password=self.settings[key]['password'])}
-            elif key == 'bling':
-                results['bling'] = {'res': self.recognizer.recognize_bing(audio, key=self.settings[key]['key'])}
-
+            results[key] = { 'res': newline.sub('', self.call_service(wav_file, audio, key, self._settings[key], 3))}
             results[key]['latency'] = timer() - start
-
         return results
+    
+    def call_service(self, wav_file, audio, name, settings, count):
+        attempt_counter = 1
+        while attempt_counter <= count:
+            try:
+                if name == 'google':
+                    return self.recognizer.recognize_google_cloud(audio, credentials_json=settings['credentials'])
+                elif name == 'watson':
+                    return self.recognizer.recognize_ibm(audio, 
+                        username=settings['username'], password=settings['password'])
+                elif name == 'bing':
+                    return self.recognizer.recognize_bing(audio, key=settings['key'])
+                elif name == 'deepspeech':
+                    return self.ds.oneshoot(wav_file)[0]
+            except:
+                print("Encountered error when calling %s with %d attempt", (name, attempt_counter))
+                raise
+
+            attempt_counter += 1
+
+        return 'Null'
+        
+
 
 class DeepSpeech:
     """Wrap DeepSpeech and provide the methods we need"""
@@ -76,7 +103,6 @@ class DeepSpeech:
         result = self.model.stt(audio, fs)
         latency = timer() - start
         audio_length = len(audio) * ( 1 / 16000)
-        print('Inference took %0.3fs for %0.3fs audio file.' % (latency, audio_length))
         return result, latency
 
 # The following code is from: http://hetland.org/coding/python/levenshtein.py
@@ -112,32 +138,24 @@ def run(args):
     with open(args.config, 'r') as f:
         settings = json.load(f)
 
-    # Let's load the DeepSpeech model first
-    ds = DeepSpeech(settings.pop('deepspeech'))
-    ds.load_model()
-
-    # Init Watson STT service
+    # Init Speech to Text services based on the config
     stt = STTServices(settings)
     stt.init()
  
     outputs = []
+    total_distance = {}
     csv_data = pandas.read_csv(args.csv)
-    total_distance = {'deepspeech':0}
-    for key in stt.settings:
-        total_distance[key] = 0
+    for service_name in stt.services:
+        total_distance[service_name] = 0
 
     end_period = re.compile("\.$")
 
     for row in csv_data.itertuples():
         results = stt.oneshoot(row[1])
-        ds_results, ds_latency = ds.oneshoot(row[1])
         transcript = row[3].strip().lower()
         label = transcript.split()
     
-        output = {'wav_file': row[1], 'transcript': transcript, 
-                'deepspeech': ds_results.strip(), 'deepspeech_latency': ds_latency,
-                'deepspeech_distance': levenshtein(label, ds_results.split())}
-        total_distance['deepspeech'] += output['deepspeech_distance']
+        output = {'wav_file': row[1], 'transcript': transcript}
 
         for result in results:
             values = results[result]
@@ -149,10 +167,12 @@ def run(args):
 
         print(json.dumps(output, indent=2))
         print('')
-        total_distance['deepspeech'] += output['deepspeech_distance']
         outputs.append(output)
 
     print("avg levenshtein:")
+    for key in total_distance:
+        total_distance[key] /= csv_data.shape[0]
+
     print(json.dumps(total_distance, indent=2))
 
     pandas.DataFrame(outputs).to_csv('results.csv', index=False)

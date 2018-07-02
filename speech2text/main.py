@@ -56,8 +56,7 @@ class STTServices:
                 elif name == 'deepspeech':
                     return self.ds.oneshoot(wav_file)[0]
             except:
-                print("Encountered error when calling %s with %d attempt", (name, attempt_counter))
-                raise
+                print("Encountered error when calling %s with %d attempt" % (name, attempt_counter))
 
             attempt_counter += 1
 
